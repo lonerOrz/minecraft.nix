@@ -1,4 +1,5 @@
 import json
+import uuid
 from datetime import datetime
 from os.path import expanduser
 from sys import argv
@@ -38,19 +39,51 @@ def refresh(profile):
     profile['refresh_token'] = new_refresh_token
 
 
+def create_offline_profile(username):
+    """Create a profile for offline mode."""
+    info(f"Creating offline profile for username: {username}")
+
+    user_uuid = str(uuid.uuid3(uuid.NAMESPACE_DNS, f'offline:{username}'))
+
+    profile = {
+        'id': user_uuid.replace('-', ''),  # Minecraft expects UUID without dashes
+        'name': username,
+        'userType': 'mojang',
+        'demo': False,
+        'offline': True,
+    }
+    return profile
+
+
 def custom_encode(obj):
     if isinstance(obj, Token):
-        return {'__type': 'Token', '__value': obj.value, '__not_after': obj.not_after.isoformat()}
+        return {
+            '__type': 'Token',
+            '__value': obj.value,
+            '__not_after': obj.not_after.isoformat(),
+        }
     return json.JSONEncoder.default(obj)
 
 
 def custom_decode(dct):
     if '__type' in dct and dct['__type'] == 'Token':
-        return Token(dct['__value'], datetime.fromisoformat(dct['__not_after']).replace(tzinfo=UTC))
+        return Token(
+            dct['__value'],
+            datetime.fromisoformat(dct['__not_after']).replace(tzinfo=UTC),
+        )
     return dct
 
 
-def authenticate(profile_path):
+def authenticate(profile_path, offline=False, offline_username=None):
+    if offline:
+        if not offline_username:
+            raise ValueError("Offline mode requires a username")
+        profile = create_offline_profile(offline_username)
+        profile_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(profile_path, 'w+') as f:
+            json.dump(profile, f, default=custom_encode)
+        return profile
+
     if profile_path.exists():
         try:
             with open(profile_path) as f:
@@ -58,6 +91,9 @@ def authenticate(profile_path):
         except json.JSONDecodeError:
             error(f"{profile_path} seems to be corrupted, try to login again.")
         else:
+            if profile.get('offline', False):
+                return profile
+
             mc_token = profile['mc_token']
             if mc_token.not_after < datetime.now(UTC):
                 refresh(profile)
@@ -73,13 +109,31 @@ def authenticate(profile_path):
 
 
 try:
-    profile_path_name = expanduser('~/.local/share/minecraft.nix/profile.json')
-    for i in range(len(argv)):
-        if argv[i] == '--profile' and i + 1 < len(argv):
-            profile_path_name = expanduser(argv[i + 1])
-            break
-    authenticate(Path(profile_path_name))
-    info("Successfully authenticated.")
+    profile_path_name = expanduser("~/.local/share/minecraft.nix/profile.json")
+    offline_mode = False
+    offline_username = None
+
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--profile" and i + 1 < len(argv):
+            i += 1
+            profile_path_name = expanduser(argv[i])
+        elif argv[i] == "--offline":
+            offline_mode = True
+            if i + 1 < len(argv) and not argv[i + 1].startswith("--"):
+                i += 1
+                offline_username = argv[i]
+            else:
+                offline_username = "Player"  # Default offline username
+        i += 1
+
+    authenticate(
+        Path(profile_path_name), offline=offline_mode, offline_username=offline_username
+    )
+    if offline_mode:
+        info("Successfully authenticated in offline mode.")
+    else:
+        info("Successfully authenticated.")
     exit(0)
 except Exception as e:
     error(f"Authentication Failed: {type(e).__name__}: {e}.")
